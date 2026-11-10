@@ -287,7 +287,8 @@ type CacheImage struct {
 	RangeEntries     []rangeEntry
 	PatchableExports []Patch
 	PatchableGOTs    []Patch
-	LocalSymbols     []*CacheLocalSymbol64
+	LocalSymbols     []*CacheLocalSymbol64 // in the cache's original nlist order
+	localsByName     []*CacheLocalSymbol64 // name-sorted view of LocalSymbols, used by GetLocalSymbol
 	PublicSymbols    []*Symbol
 	ObjC             objcInfo
 
@@ -333,6 +334,7 @@ func (i *CacheImage) Free() {
 	i.PatchableExports = nil
 	i.PatchableGOTs = nil
 	i.LocalSymbols = nil
+	i.localsByName = nil
 	i.PublicSymbols = nil
 	i.ObjC = objcInfo{}
 	i.Analysis = analysis{}
@@ -1274,9 +1276,7 @@ func (i *CacheImage) ParseLocalSymbols(dump bool) error {
 			}
 		}
 
-		sort.Slice(i.LocalSymbols, func(j, k int) bool {
-			return i.LocalSymbols[j].Name < i.LocalSymbols[k].Name
-		})
+		i.indexLocalSymbols()
 
 		i.Analysis.State.SetPrivates(true)
 	}
@@ -1284,13 +1284,26 @@ func (i *CacheImage) ParseLocalSymbols(dump bool) error {
 	return nil
 }
 
+// indexLocalSymbols builds the name-sorted view of LocalSymbols used by GetLocalSymbol.
+//
+// LocalSymbols itself must stay in the cache's original nlist order. Consumers that write a
+// symtab (dyld extract) emit symbols in that order, and tools that read it, such as
+// symbolic, keep the FIRST symbol at any address. For identical-code-folded functions
+// several names share one address, so re-sorting by name changes which alias is reported.
+func (i *CacheImage) indexLocalSymbols() {
+	i.localsByName = append([]*CacheLocalSymbol64(nil), i.LocalSymbols...)
+	sort.SliceStable(i.localsByName, func(j, k int) bool {
+		return i.localsByName[j].Name < i.localsByName[k].Name
+	})
+}
+
 // GetLocalSymbol returns the local symbol matching the given name
 func (i *CacheImage) GetLocalSymbol(name string) (*CacheLocalSymbol64, error) {
 	i.ParseLocalSymbols(false)
 
-	idx := sort.Search(len(i.LocalSymbols), func(idx int) bool { return i.LocalSymbols[idx].Name >= name })
-	if idx < len(i.LocalSymbols) && i.LocalSymbols[idx].Name == name {
-		return i.LocalSymbols[idx], nil
+	idx := sort.Search(len(i.localsByName), func(idx int) bool { return i.localsByName[idx].Name >= name })
+	if idx < len(i.localsByName) && i.localsByName[idx].Name == name {
+		return i.localsByName[idx], nil
 	}
 
 	return nil, fmt.Errorf("local symbol %s not found in image %s", name, filepath.Base(i.Name))
